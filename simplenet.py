@@ -10,7 +10,6 @@ import logging
 import os
 import pickle
 from collections import OrderedDict
-
 import math
 import numpy as np
 import torch
@@ -131,9 +130,6 @@ class SimpleNet(torch.nn.Module):
         proj_layer_type=0,
         **kwargs,
     ):
-        pid = os.getpid()
-        def show_mem():
-            return(psutil.Process(pid).memory_info())
 
         self.backbone = backbone.to(device)
         self.layers_to_extract_from = layers_to_extract_from
@@ -556,7 +552,6 @@ class SimpleNet(torch.nn.Module):
         features = []
         labels_gt = []
         masks_gt = []
-        from sklearn.manifold import TSNE
 
         with tqdm.tqdm(dataloader, desc="Inferring...", leave=False) as data_iterator:
             for data in data_iterator:

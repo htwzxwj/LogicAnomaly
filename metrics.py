@@ -85,9 +85,12 @@ def compute_pixelwise_retrieval_metrics(anomaly_segmentations, ground_truth_mask
 
 import pandas as pd
 from skimage import measure
+
 def compute_pro(masks, amaps, num_th=200):
 
-    df = pd.DataFrame([], columns=["pro", "fpr", "threshold"])
+    # --- 修改 1: 初始化一个空列表，而不是 DataFrame ---
+    results_list = [] 
+    
     binary_amaps = np.zeros_like(amaps, dtype=np.bool)
 
     min_th = amaps.min()
@@ -112,11 +115,59 @@ def compute_pro(masks, amaps, num_th=200):
         fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
         fpr = fp_pixels / inverse_masks.sum()
 
-        df = df.append({"pro": np.mean(pros), "fpr": fpr, "threshold": th}, ignore_index=True)
+        # --- 修改 2: 将新数据(字典)添加到列表中 (这非常快) ---
+        results_list.append({"pro": np.mean(pros), "fpr": fpr, "threshold": th})
+        
+        # (删除了原来的 new_row 和 pd.concat)
 
+    # --- 修改 3: 循环结束后，一次性从列表创建 DataFrame ---
+    df = pd.DataFrame(results_list)
+
+    # --- 后续处理不变 ---
     # Normalize FPR from 0 ~ 1 to 0 ~ 0.3
     df = df[df["fpr"] < 0.3]
     df["fpr"] = df["fpr"] / df["fpr"].max()
 
     pro_auc = metrics.auc(df["fpr"], df["pro"])
     return pro_auc
+
+# def compute_pro(masks, amaps, num_th=200):
+
+#     df = pd.DataFrame([], columns=["pro", "fpr", "threshold"])
+#     binary_amaps = np.zeros_like(amaps, dtype=np.bool)
+
+#     min_th = amaps.min()
+#     max_th = amaps.max()
+#     delta = (max_th - min_th) / num_th
+
+#     k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+#     for th in np.arange(min_th, max_th, delta):
+#         binary_amaps[amaps <= th] = 0
+#         binary_amaps[amaps > th] = 1
+
+#         pros = []
+#         for binary_amap, mask in zip(binary_amaps, masks):
+#             binary_amap = cv2.dilate(binary_amap.astype(np.uint8), k)
+#             for region in measure.regionprops(measure.label(mask)):
+#                 axes0_ids = region.coords[:, 0]
+#                 axes1_ids = region.coords[:, 1]
+#                 tp_pixels = binary_amap[axes0_ids, axes1_ids].sum()
+#                 pros.append(tp_pixels / region.area)
+
+#         inverse_masks = 1 - masks
+#         fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
+#         fpr = fp_pixels / inverse_masks.sum()
+
+#         # 1. 创建一个包含新行数据的 DataFrame
+#         new_row = pd.DataFrame([{"pro": np.mean(pros), "fpr": fpr, "threshold": th}])
+
+#         # 2. 使用 pd.concat 将新行连接到旧的 DataFrame
+#         df = pd.concat([df, new_row], ignore_index=True)
+#         # df = df.append({"pro": np.mean(pros), "fpr": fpr, "threshold": th}, ignore_index=True)
+
+#     # Normalize FPR from 0 ~ 1 to 0 ~ 0.3
+#     df = df[df["fpr"] < 0.3]
+#     df["fpr"] = df["fpr"] / df["fpr"].max()
+
+#     pro_auc = metrics.auc(df["fpr"], df["pro"])
+#     return pro_auc
