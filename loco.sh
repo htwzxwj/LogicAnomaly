@@ -1,10 +1,10 @@
-datapath=/mnt/e/datasets/mvtec_loco/
+datapath=/data/datasets/MVTecLoco/
 datasets=('breakfast_box' 'juice_bottle' 'pushpins' 'screw_bag' 'splicing_connectors')
 dataset_flags=($(for dataset in "${datasets[@]}"; do echo '-d '"${dataset}"; done))
 
 python3 main.py \
 --gpu 1 \
---seed 0 \
+--seed 42 \
 --log_group simplenet_mvtec_loco \
 --log_project MVTecLOCO_Results \
 --results_path results \
@@ -25,6 +25,6 @@ net \
 --dsc_margin .5 \
 --pre_proj 1 \
 dataset \
---batch_size 8 \
+--batch_size 16 \
 --resize 329 \
 --imagesize 288 "${dataset_flags[@]}" mvtecloco $datapath

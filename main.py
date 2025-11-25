@@ -11,6 +11,9 @@ import common
 import metrics
 import simplenet 
 import utils
+import setproctitle
+
+setproctitle.setproctitle("LogicAnomaly-Training-SimpleNet")
 
 LOGGER = logging.getLogger(__name__)
 

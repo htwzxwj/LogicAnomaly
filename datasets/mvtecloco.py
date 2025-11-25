@@ -1,7 +1,7 @@
 import os
 from enum import Enum
 
-import PIL
+from PIL import Image
 import torch
 from torchvision import transforms
 
@@ -99,12 +99,13 @@ class MVTecLocoDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         classname, anomaly, image_path, mask_path = self.data_to_iterate[idx]
-        image = PIL.Image.open(image_path).convert("RGB")
-        image = self.transform_img(image)
+        image = Image.open(image_path).convert("RGB")
+        image = self.transform_img(image) # type: ignore
 
-        if self.split == DatasetSplit.TEST and mask_path is not None:
-            mask = PIL.Image.open(mask_path)
-            mask = self.transform_mask(mask)
+        if self.split == DatasetSplit.TEST and mask_path is not None and os.path.isdir(mask_path):
+            mask_path = os.path.join(mask_path, "000.png")  # * for LOCO, only one mask per anomaly image
+            mask = Image.open(mask_path)
+            mask = self.transform_mask(mask) # type: ignore
         else:
             mask = torch.zeros([1, *image.size()[1:]])
 
