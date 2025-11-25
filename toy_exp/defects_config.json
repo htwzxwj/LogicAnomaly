@@ -1,0 +1,20 @@
+[
+  {
+    "defect_name": "defect_255",
+    "pixel_value": 255,
+    "saturation_threshold": 1.0,
+    "relative_saturation": true
+  },
+  {
+    "defect_name": "defect_254",
+    "pixel_value": 254,
+    "saturation_threshold": 1.0,
+    "relative_saturation": true
+  },
+  {
+    "defect_name": "defect_253",
+    "pixel_value": 253,
+    "saturation_threshold": 1.0,
+    "relative_saturation": true
+  }
+]

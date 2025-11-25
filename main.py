@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-
 import click
 import numpy as np
 import torch
@@ -17,6 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 _DATASETS = {
     "mvtec": ["datasets.mvtec", "MVTecDataset"],
+    "mvtecloco": ["datasets.mvtecloco", "MVTecLocoDataset"],
 }
 
 
@@ -84,7 +84,9 @@ def run(
 
             SimpleNet.set_model_dir(os.path.join(models_dir, f"{i}"), dataset_name)
             if not test:
-                i_auroc, p_auroc, pro_auroc = SimpleNet.train(dataloaders["training"], dataloaders["testing"])
+                i_auroc, p_auroc, pro_auroc, auc_spro = SimpleNet.train(
+                    dataloaders["training"], dataloaders["testing"]
+                )
             else:
                 # BUG: the following line is not using. Set test with True by default.
                 # i_auroc, p_auroc, pro_auroc =  SimpleNet.test(dataloaders["training"], dataloaders["testing"], save_segmentation_images)
@@ -96,6 +98,7 @@ def run(
                     "instance_auroc": i_auroc, # auroc,
                     "full_pixel_auroc": p_auroc, # full_pixel_auroc,
                     "anomaly_pixel_auroc": pro_auroc,
+                    "auc_spro_0.3": auc_spro,
                 }
             )
 

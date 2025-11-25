@@ -369,20 +369,31 @@ class SimpleNet(torch.nn.Module):
 
             # Compute PRO score & PW Auroc for all images
             pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
-                norm_segmentations, masks_gt)
-                # segmentations, masks_gt
+                norm_segmentations, masks_gt
+            )
             full_pixel_auroc = pixel_scores["auroc"]
 
-            pro = metrics.compute_pro(np.squeeze(np.array(masks_gt)), 
-                                            norm_segmentations)
+            masks_array = np.squeeze(np.array(masks_gt))
+            pro = metrics.compute_pro(masks_array, norm_segmentations)
+            auc_spro = 0
+            # TODO auc_spro 
+            # auc_spro_results = compute_auc_spro_curve_from_defects_config(
+            #                         masks=masks,
+            #                         amaps=amaps,
+            # *                         defects_config_path="defects_config.json",
+            #                         max_fprs=[0.01, 0.05, 0.1, 0.3, 1.0],
+            #                         num_thresholds=200,
+            #                         structuring_element_size=1)
+            # auc_spro = auc_spro_results["auc_spro"].get(0.3, 0.0)
         else:
             full_pixel_auroc = -1 
             pro = -1
+            auc_spro = -1
 
-        return auroc, full_pixel_auroc, pro
+        return auroc, full_pixel_auroc, pro, auc_spro
         
     
-    def train(self, training_data, test_data):
+    def train(self, training_data, test_data): # type: ignore
 
         
         state_dict = {}
@@ -398,9 +409,11 @@ class SimpleNet(torch.nn.Module):
 
             self.predict(training_data, "train_")
             scores, segmentations, features, labels_gt, masks_gt = self.predict(test_data)
-            auroc, full_pixel_auroc, anomaly_pixel_auroc = self._evaluate(test_data, scores, segmentations, features, labels_gt, masks_gt)
-            
-            return auroc, full_pixel_auroc, anomaly_pixel_auroc
+            auroc, full_pixel_auroc, anomaly_pixel_auroc, auc_spro = self._evaluate(
+                test_data, scores, segmentations, features, labels_gt, masks_gt
+            )
+
+            return auroc, full_pixel_auroc, anomaly_pixel_auroc, auc_spro
         
         def update_state_dict(d):
             
@@ -419,29 +432,34 @@ class SimpleNet(torch.nn.Module):
 
             # torch.cuda.empty_cache()
             scores, segmentations, features, labels_gt, masks_gt = self.predict(test_data)
-            auroc, full_pixel_auroc, pro = self._evaluate(test_data, scores, segmentations, features, labels_gt, masks_gt)
+            auroc, full_pixel_auroc, pro, auc_spro = self._evaluate(
+                test_data, scores, segmentations, features, labels_gt, masks_gt
+            )
             self.logger.logger.add_scalar("i-auroc", auroc, i_mepoch)
             self.logger.logger.add_scalar("p-auroc", full_pixel_auroc, i_mepoch)
             self.logger.logger.add_scalar("pro", pro, i_mepoch)
+            self.logger.logger.add_scalar("auc_spro_0.3", auc_spro, i_mepoch)
 
             if best_record is None:
-                best_record = [auroc, full_pixel_auroc, pro]
+                best_record = [auroc, full_pixel_auroc, pro, auc_spro]
                 update_state_dict(state_dict)
                 # state_dict = OrderedDict({k:v.detach().cpu() for k, v in self.state_dict().items()})
             else:
                 if auroc > best_record[0]:
-                    best_record = [auroc, full_pixel_auroc, pro]
+                    best_record = [auroc, full_pixel_auroc, pro, auc_spro]
                     update_state_dict(state_dict)
                     # state_dict = OrderedDict({k:v.detach().cpu() for k, v in self.state_dict().items()})
                 elif auroc == best_record[0] and full_pixel_auroc > best_record[1]:
                     best_record[1] = full_pixel_auroc
-                    best_record[2] = pro 
+                    best_record[2] = pro
+                    best_record[3] = auc_spro
                     update_state_dict(state_dict)
                     # state_dict = OrderedDict({k:v.detach().cpu() for k, v in self.state_dict().items()})
 
             print(f"----- {i_mepoch} I-AUROC:{round(auroc, 4)}(MAX:{round(best_record[0], 4)})"
                   f"  P-AUROC{round(full_pixel_auroc, 4)}(MAX:{round(best_record[1], 4)}) -----"
-                  f"  PRO-AUROC{round(pro, 4)}(MAX:{round(best_record[2], 4)}) -----")
+                  f"  PRO-AUROC{round(pro, 4)}(MAX:{round(best_record[2], 4)}) -----"
+                  f"  AUC-sPRO{round(auc_spro, 4)}(MAX:{round(best_record[3], 4)}) -----")
         
         torch.save(state_dict, ckpt_path)
         
