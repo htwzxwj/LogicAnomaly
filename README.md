@@ -112,6 +112,12 @@ python3 main.py \
 }
 ```
 
+
+## baseline方法
+```bash
+bash ./baseline/ST/st.sh
+```
+
 ## 参考文献
 
 1. SimpleNet: A Simple Network for Image Anomaly Detection and Localization (CVPR 2023)
