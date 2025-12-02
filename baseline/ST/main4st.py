@@ -8,15 +8,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]  # <repo_root>
 sys.path.insert(0, str(ROOT))
-import backbones
-import common
-import metrics
-import simplenet
 import utils
 import setproctitle
 import src.StudentTeacher
+from src.AnomalyDataset import AnomalyDataset
+from torchvision import transforms
+from torch.utils.data.dataloader import DataLoader
 
-setproctitle.setproctitle("LogicAnomaly-Training-StudentTeacher")
+setproctitle.setproctitle("LogicAnomaly-Training-StudentTeacher Model")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +33,8 @@ _DATASETS = {
 @click.option("--log_project", type=str, default="project")
 @click.option("--run_name", type=str, default="test")
 @click.option("--test", is_flag=True)
+@click.option("--teacher_epochs", type=int, default=1000)
+@click.option("--student_epochs", type=int, default=15)
 def main(**kwargs):
     pass
 
@@ -48,6 +49,8 @@ def run(
     log_project,
     run_name,
     test,
+    teacher_epochs,
+    student_epochs,
 ):
     methods = {key: item for (key, item) in methods}
 
@@ -55,7 +58,7 @@ def run(
         results_path, log_project, log_group, run_name, mode="overwrite"
     )
 
-    list_of_dataloaders = methods["get_dataloaders"](seed)
+    list_of_dataloaders = methods["get_dataloaders"]()
 
     device = utils.set_torch_device(gpu)
 
@@ -63,7 +66,7 @@ def run(
     for dataloader_count, dataloaders in enumerate(list_of_dataloaders):
         LOGGER.info(
             "Evaluating dataset [{}] ({}/{})...".format(
-                dataloaders["training"].name,
+                dataloaders["name"],
                 dataloader_count + 1,
                 len(list_of_dataloaders),
             )
@@ -71,7 +74,7 @@ def run(
 
         utils.fix_seeds(seed, device)
 
-        dataset_name = dataloaders["training"].name
+        dataset_name = dataloaders["name"]
 
         imagesize = dataloaders["training"].dataset.imagesize
         stnet_list = methods["get_stnet"](device)
@@ -87,7 +90,12 @@ def run(
 
             stnet.set_model_dir(os.path.join(models_dir, f"{i}"), dataset_name)
             if not test:
-                i_auroc = stnet.train(training_data = dataloaders["training"], test_data = dataloaders["testing"])
+                i_auroc = stnet.train(
+                    training_data = dataloaders["training"], 
+                    test_data = dataloaders["testing"],
+                    teacher_epochs = teacher_epochs,
+                    student_epochs = student_epochs,
+                    )
             else:
                 # BUG: the following line is not using. Set test with True by default.
                 i_auroc =  stnet.test(dataloaders["training"], dataloaders["testing"], save_segmentation_images = False)
@@ -140,127 +148,67 @@ def stnet(patch_size,
 @click.argument("name", type=str)
 @click.argument("data_path", type=click.Path(exists=True, file_okay=False))
 @click.option("--subdatasets", "-d", multiple=True, type=str, required=True)
-@click.option("--train_val_split", type=float, default=1, show_default=True)
 @click.option("--batch_size", default=2, type=int, show_default=True)
 @click.option("--num_workers", default=2, type=int, show_default=True)
-@click.option("--resize", default=256, type=int, show_default=True)
 @click.option("--imagesize", default=224, type=int, show_default=True)
-@click.option("--rotate_degrees", default=0, type=int)
-@click.option("--translate", default=0, type=float)
-@click.option("--scale", default=0.0, type=float)
-@click.option("--brightness", default=0.0, type=float)
-@click.option("--contrast", default=0.0, type=float)
-@click.option("--saturation", default=0.0, type=float)
-@click.option("--gray", default=0.0, type=float)
-@click.option("--hflip", default=0.0, type=float)
-@click.option("--vflip", default=0.0, type=float)
-@click.option("--augment", is_flag=True)
+@click.option("--patchsize", type=int, default=33)
 def dataset(
     name,
     data_path,
     subdatasets,
-    train_val_split,
     batch_size,
-    resize,
     imagesize,
     num_workers,
-    rotate_degrees,
-    translate,
-    scale,
-    brightness,
-    contrast,
-    saturation,
-    gray,
-    hflip,
-    vflip,
-    augment,
+    patchsize=33,
 ):
-    dataset_info = _DATASETS[name]
-    dataset_library = __import__(dataset_info[0], fromlist=[dataset_info[1]])
-
-    def get_dataloaders(seed):
+    
+    def get_dataloaders():
         dataloaders = []
         for subdataset in subdatasets:
-            train_dataset = dataset_library.__dict__[dataset_info[1]](
-                data_path,
-                classname=subdataset,
-                resize=resize,
-                train_val_split=train_val_split,
-                imagesize=imagesize,
-                split=dataset_library.DatasetSplit.TRAIN,
-                seed=seed,
-                rotate_degrees=rotate_degrees,
-                translate=translate,
-                brightness_factor=brightness,
-                contrast_factor=contrast,
-                saturation_factor=saturation,
-                gray_p=gray,
-                h_flip_p=hflip,
-                v_flip_p=vflip,
-                scale=scale,
-                augment=augment,
-            )
-
-            test_dataset = dataset_library.__dict__[dataset_info[1]](
-                data_path,
-                classname=subdataset,
-                resize=resize,
-                imagesize=imagesize,
-                split=dataset_library.DatasetSplit.TEST,
-                seed=seed,
-            )
+            train_dataset = AnomalyDataset(
+                    root_dir=os.path.join(data_path, subdataset),
+                    transform=transforms.Compose([
+                        transforms.Resize((imagesize, imagesize)),
+                        transforms.RandomCrop((patchsize, patchsize)),
+                        transforms.RandomHorizontalFlip(),
+                        transforms.RandomVerticalFlip(),
+                        transforms.RandomRotation(180),
+                        transforms.ToTensor(),
+                        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]),  # type: ignore[arg-type]
+                    type='train')
             
+
+            test_dataset = AnomalyDataset(
+                root_dir=os.path.join(data_path, subdataset),
+                transform=transforms.Compose([
+                    transforms.Resize((imagesize, imagesize)),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]),# type: ignore[arg-type]
+                    gt_transform=transforms.Compose([
+                    transforms.Resize((imagesize, imagesize)),
+                    transforms.ToTensor()]),# type: ignore[arg-type]
+                    type='test') 
+                  
             LOGGER.info(f"Dataset: train={len(train_dataset)} test={len(test_dataset)}")
 
-            train_dataloader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                prefetch_factor=2,
-                pin_memory=True,
-            )
-
-            test_dataloader = torch.utils.data.DataLoader(
-                test_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                prefetch_factor=2,
-                pin_memory=True,
-            )
+            train_dataloader = DataLoader(train_dataset, 
+                                batch_size=batch_size,
+                                shuffle=True, 
+                                num_workers=num_workers)
+            
+            test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=batch_size, 
+                                 shuffle=True, 
+                                 num_workers=num_workers)
+            dataloader_dict = {
+                "training": train_dataloader,
+                "testing": test_dataloader,
+            }
 
             train_dataloader.name = name
             if subdataset is not None:
                 train_dataloader.name += "_" + subdataset
-
-            if train_val_split < 1:
-                val_dataset = dataset_library.__dict__[dataset_info[1]](
-                    data_path,
-                    classname=subdataset,
-                    resize=resize,
-                    train_val_split=train_val_split,
-                    imagesize=imagesize,
-                    split=dataset_library.DatasetSplit.VAL,
-                    seed=seed,
-                )
-
-                val_dataloader = torch.utils.data.DataLoader(
-                    val_dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    num_workers=num_workers,
-                    prefetch_factor=4,
-                    pin_memory=True,
-                )
-            else:
-                val_dataloader = None
-            dataloader_dict = {
-                "training": train_dataloader,
-                "validation": val_dataloader,
-                "testing": test_dataloader,
-            }
-
+            
             dataloaders.append(dataloader_dict)
         return dataloaders
 

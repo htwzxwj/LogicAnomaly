@@ -4,6 +4,8 @@ import numpy as np
 import os
 from sklearn import metrics
 import json
+from scipy.ndimage import label
+from sklearn.metrics import auc
 
 
 def compute_imagewise_retrieval_metrics(
@@ -535,3 +537,116 @@ def get_auc_spro_results(metrics,
         auc_spro['mean'] = mean_spros
 
     return {'auc_spro': auc_spro}
+
+
+
+import numpy as np
+import os
+from scipy.ndimage import label
+from sklearn.metrics import auc
+
+def compute_loco_auc_spro(anomaly_maps, masks, image_ids, defects_config, integration_limit=0.3, num_thresholds=100):
+    """
+    计算符合 MVTec LOCO AD 定义的 AUC-sPRO (支持饱和阈值)
+    """
+    gt_regions = [] 
+    neg_scores = [] 
+    
+    # 如果没有 config，默认使用空字典 (退化为标准 PRO)
+    if defects_config is None:
+        defects_config = {}
+
+    # 1. 遍历每一张图片，提取缺陷区域信息
+    for i in range(len(masks)):
+        mask = masks[i]
+        amap = anomaly_maps[i]
+        # 获取文件名 (用于去 config 查阈值)
+        # 假设 image_ids 是文件名列表，如 ['000.png', '001.png']
+        img_id = image_ids[i] 
+        
+        # 收集背景分数 (用于计算 FPR)
+        neg_scores.append(amap[mask == 0])
+
+        if np.sum(mask) == 0:
+            continue
+            
+        # 连通域分析：找到独立的缺陷块
+        labeled_mask, num_features = label(mask)
+        
+        # 获取该图片的配置列表
+        # Config 结构通常是: {"000.png": [{"region_id": 1, "saturation_threshold": 100}, ...]}
+        img_config = defects_config.get(img_id, [])
+        
+        for region_idx in range(1, num_features + 1):
+            region_mask = (labeled_mask == region_idx)
+            region_scores = amap[region_mask]
+            region_area = np.sum(region_mask)
+            
+            # --- 确定 Saturation Threshold (s) ---
+            # 默认 s = 区域自身面积 (即标准 PRO，需覆盖 100% 才算满分)
+            s_value = region_area 
+            
+            # 尝试从 Config 匹配 s 值 (主要针对逻辑异常)
+            # 这里的匹配逻辑假设 config 列表顺序与 label 顺序一致
+            # 如果你的 config 包含 region_id，建议改成按 id 匹配
+            if img_config and (region_idx - 1) < len(img_config):
+                defect_info = img_config[region_idx - 1]
+                # 获取饱和阈值，如果没有定义则回退到面积
+                s_value = defect_info.get("saturation_threshold", region_area)
+
+            gt_regions.append({
+                "scores": region_scores,
+                "s_value": s_value
+            })
+
+    if not gt_regions:
+        return -1.0, -1.0 # 无法计算
+
+    neg_scores = np.concatenate(neg_scores)
+    
+    # 2. 遍历阈值计算曲线
+    pro_curve = []
+    fpr_curve = []
+    thresholds = np.linspace(0, 1, num_thresholds)
+    
+    for th in thresholds:
+        # --- 计算 sPRO (核心) ---
+        region_overlaps = []
+        for item in gt_regions:
+            intersection = np.sum(item["scores"] > th)
+            s = item["s_value"]
+            # 饱和逻辑: 只要覆盖像素 > s，得分就是 1.0
+            # max(s, 1e-6) 防止除零
+            saturated_overlap = min(1.0, intersection / max(s, 1e-6))
+            region_overlaps.append(saturated_overlap)
+        
+        pro = np.mean(region_overlaps)
+        pro_curve.append(pro)
+        
+        # --- 计算 FPR ---
+        fp = np.sum(neg_scores > th)
+        fpr = fp / len(neg_scores)
+        fpr_curve.append(fpr)
+
+    # 3. 计算 AUC (积分上限 0.3)
+    fpr_curve = np.array(fpr_curve)
+    pro_curve = np.array(pro_curve)
+    
+    # 排序用于 AUC 计算
+    sorted_indices = np.argsort(fpr_curve)
+    fpr_sorted = fpr_curve[sorted_indices]
+    pro_sorted = pro_curve[sorted_indices]
+
+    # 截取区间 [0, integration_limit]
+    target_idx = fpr_sorted <= integration_limit
+    fpr_target = fpr_sorted[target_idx]
+    pro_target = pro_sorted[target_idx]
+    
+    if len(fpr_target) < 2:
+        return 0.0
+
+    auc_value = auc(fpr_target, pro_target)
+    # 标准化：除以积分上限
+    auc_spro = auc_value / integration_limit 
+
+    return auc_spro

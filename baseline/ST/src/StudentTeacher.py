@@ -57,7 +57,7 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
     def _load_models_from_disk(self):
         """Load pretrained weights for ResNet, Teacher, and Students if they exist."""
         # Load ResNet
-        resnet_path = os.path.join(self.model_dir, self.dataset_name, 'resnet18.pt')
+        resnet_path = os.path.join(self.ckpt_dir,  'resnet18.pt')
         if os.path.exists(resnet_path):
             print(f"Loading ResNet from {resnet_path}")
             # Re-init to load state dict correctly before slicing
@@ -69,7 +69,7 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
             print(f"ResNet model not found at {resnet_path}, using ImageNet pretrained weights.")
 
         # Load Teacher
-        teacher_path = os.path.join(self.model_dir, self.dataset_name, f'teacher_{self.patch_size}_net.pt')
+        teacher_path = os.path.join(self.ckpt_dir, f'teacher_{self.patch_size}_net.pt')
         if os.path.exists(teacher_path):
             print(f"Loading Teacher from {teacher_path}")
             load_model(self.teacher, teacher_path)
@@ -78,7 +78,7 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
         
         # Load Students
         for i in range(self.n_students):
-            student_path = os.path.join(self.model_dir, self.dataset_name, f'student_{self.patch_size}_net_{i}.pt')
+            student_path = os.path.join(self.ckpt_dir, f'student_{self.patch_size}_net_{i}.pt')
             if os.path.exists(student_path):
                 print(f"Loading Student {i} from {student_path}")
                 load_model(self.students[i], student_path)
@@ -117,7 +117,7 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
     
     def _train_teacher(self, dataloader, max_epochs, learning_rate, weight_decay):
         print("Starting Teacher Training...")
-        model_save_path = os.path.join(self.model_dir, self.dataset_name, f'teacher_{self.patch_size}_net.pt')
+        model_save_path = os.path.join(self.ckpt_dir, f'teacher_{self.patch_size}_net.pt')
         
         optimizer = optim.Adam(self.teacher.parameters(),
                                lr=learning_rate,
@@ -164,9 +164,18 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
         print(f'Preprocessing of training dataset {self.dataset_name}...')
         self.teacher.eval()
         t_mu, t_var, N = 0, 0, 0
+        patch_size = self.patch_size
+
         with torch.no_grad():
             for i, batch in tqdm(enumerate(dataloader), desc="Preprocessing"):
                 inputs = batch['image'].to(self.device)
+                # if inputs.shape[2] > patch_size or inputs.shape[3] > patch_size:
+                #     h_img, w_img = inputs.shape[2], inputs.shape[3]
+                    
+                #     top = torch.randint(0, h_img - patch_size + 1, (1,)).item()
+                #     left = torch.randint(0, w_img - patch_size + 1, (1,)).item()
+                    
+                #     inputs = inputs[:, :, top:top+patch_size, left:left+patch_size]
                 t_out = self.teacher.fdfe(inputs)
                 t_mu, t_var, N = increment_mean_and_var(t_mu, t_var, N, t_out)
         
@@ -176,7 +185,7 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
 
         for j, student in enumerate(self.students):
             min_running_loss = np.inf
-            model_name = os.path.join(self.model_dir, self.dataset_name, f'student_{self.patch_size}_net_{j}.pt')
+            model_name = os.path.join(self.ckpt_dir, f'student_{self.patch_size}_net_{j}.pt')
             print(f'Training Student {j} on anomaly-free dataset ...')
 
             for epoch in range(max_epochs):
@@ -186,6 +195,14 @@ class StudentTeacherAnomalyDetector(torch.nn.Module):
                     optimizers[j].zero_grad()
 
                     inputs = batch['image'].to(self.device)
+                    # if inputs.shape[2] > patch_size or inputs.shape[3] > patch_size:
+                    #     h_img, w_img = inputs.shape[2], inputs.shape[3]
+                        
+                    #     top = torch.randint(0, h_img - patch_size + 1, (1,)).item()
+                    #     left = torch.randint(0, w_img - patch_size + 1, (1,)).item()
+                        
+                    #     inputs = inputs[:, :, top:top+patch_size, left:left+patch_size]
+
                     with torch.no_grad():
                         targets = (self.teacher.fdfe(inputs) - t_mu) / torch.sqrt(t_var)
                     

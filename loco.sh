@@ -8,7 +8,7 @@ python3 main.py \
 --log_group simplenet_mvtec_loco \
 --log_project MVTecLOCO_Results \
 --results_path results \
---run_name run \
+--run_name test \
 net \
 -b wideresnet50 \
 -le layer2 \

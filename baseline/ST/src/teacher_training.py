@@ -89,7 +89,7 @@ def train(args):
                                 transforms.RandomVerticalFlip(),
                                 transforms.RandomRotation(180),
                                 transforms.ToTensor(),
-                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]),  # type: ignore[arg-type]
                              type='train')
     dataloader = DataLoader(dataset, 
                             batch_size=args.batch_size,

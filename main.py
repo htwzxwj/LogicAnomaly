@@ -92,7 +92,7 @@ def run(
                 )
             else:
                 # BUG: the following line is not using. Set test with True by default.
-                # i_auroc, p_auroc, pro_auroc =  SimpleNet.test(dataloaders["training"], dataloaders["testing"], save_segmentation_images)
+                i_auroc, p_auroc, pro_auroc =  SimpleNet.test(dataloaders["training"], dataloaders["testing"], save_segmentation_images = False)
                 print("Warning: Pls set test with true by default")
 
             result_collect.append(

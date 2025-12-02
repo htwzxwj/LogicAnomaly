@@ -1,4 +1,4 @@
-datapath=/mnt/e/datasets/mvtec_ad/
+datapath=/data/datasets/MVTecLoco
 datasets=('screw' 'pill' 'capsule' 'carpet' 'grid' 'tile' 'wood' 'zipper' 'cable' 'toothbrush' 'transistor' 'metal_nut' 'bottle' 'hazelnut' 'leather')
 dataset_flags=($(for dataset in "${datasets[@]}"; do echo '-d '"${dataset}"; done))
 
@@ -8,7 +8,7 @@ python3 main.py \
 --log_group simplenet_mvtec \
 --log_project MVTecAD_Results \
 --results_path results \
---run_name run \
+--run_name test \
 net \
 -b wideresnet50 \
 -le layer2 \
