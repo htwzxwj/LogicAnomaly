@@ -375,16 +375,32 @@ class SimpleNet(torch.nn.Module):
 
             masks_array = np.squeeze(np.array(masks_gt))
             pro = metrics.compute_pro(masks_array, norm_segmentations)
-            auc_spro = 0
-            # TODO auc_spro 
-            # auc_spro_results = compute_auc_spro_curve_from_defects_config(
-            #                         masks=masks,
-            #                         amaps=amaps,
-            # *                         defects_config_path="defects_config.json",
-            #                         max_fprs=[0.01, 0.05, 0.1, 0.3, 1.0],
-            #                         num_thresholds=200,
-            #                         structuring_element_size=1)
-            # auc_spro = auc_spro_results["auc_spro"].get(0.3, 0.0)
+            
+            # Compute simple AUC sPRO with saturation=0.5
+            # Ensure shapes are (N, H, W) for OnlineAuSPRO
+            spro_preds = norm_segmentations
+            spro_masks = masks_array
+            
+            if spro_preds.ndim == 2:
+                spro_preds = spro_preds[None, ...]
+            if spro_masks.ndim == 2:
+                spro_masks = spro_masks[None, ...]
+            
+            online_spro = metrics.OnlineAuSPRO(
+                num_thresholds=200,
+                range_min=0.0,
+                range_max=1.0,
+                saturation_threshold=0.5,
+                relative_saturation=True
+            ).to(self.device)
+            
+            batch_size = 32
+            for i in range(0, len(spro_preds), batch_size):
+                b_preds = torch.from_numpy(spro_preds[i:i+batch_size]).float().to(self.device)
+                b_masks = torch.from_numpy(spro_masks[i:i+batch_size]).float().to(self.device)
+                online_spro.update(b_preds, b_masks)
+                
+            auc_spro = online_spro.compute(max_fpr=0.3)
         else:
             full_pixel_auroc = -1 
             pro = -1

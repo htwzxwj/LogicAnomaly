@@ -19,6 +19,36 @@ conda env create --name mvtec_loco_eval --file=conda_environment.yml
 conda activate mvtec_loco_eval
 ```
 
+## Evaluating online
+1. Import the aggregator:
+
+```python
+from src.online_aggregation import OnlineMetricsAggregator
+```
+2. Initialize with thresholds:
+```python
+import numpy as np
+# Define thresholds covering your score range (e.g., 0.0 to 1.0)
+thresholds = np.linspace(0, 1, 100)
+aggregator = OnlineMetricsAggregator(anomaly_thresholds=thresholds)
+```
+
+3. Update incrementally:
+```python
+   # Inside your evaluation loop:
+   aggregator.update(anomaly_map, gt_map, group_id='structural_anomalies')
+```
+
+4. Get Results:
+```python
+   # Compute AUC for specific groups (e.g., structural + good images)
+   auc = aggregator.get_auc_spro(
+       group_ids=['structural_anomalies', 'good'],
+        max_fpr=0.3
+    )
+   print(f"AU sPRO (up to 0.3 FPR): {auc}")
+```
+
 ## Evaluating a single experiment.
 The evaluation script requires an anomaly map to be present for each test sample in our dataset in `.tiff` format. 
 Anomaly maps must contain real-valued anomaly scores and their size must match the one of the corresponding dataset images. 

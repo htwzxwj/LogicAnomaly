@@ -2,6 +2,7 @@
 import cv2
 import numpy as np
 import os
+import torch
 from sklearn import metrics
 import json
 
@@ -94,6 +95,8 @@ def _collect_fpr_spro_curve(
     num_thresholds: int = 200,
     structuring_element_size: int = 1,
     defect_id_to_config: Optional[Dict[int, Dict]] = None,
+    saturation_threshold: Optional[float] = None,
+    relative_saturation: bool = True,
 ):
     """
     Collect false positive rates and mean (saturated) PRO values over thresholds.
@@ -106,7 +109,8 @@ def _collect_fpr_spro_curve(
         - Else (absolute):              saturation_area = min(cfg["saturation_threshold"], defect_area)
 
     When `defect_id_to_config` is None, it falls back to region-wise PRO using
-    connected components (no extra saturation), i.e., PRO = TP / region.area.
+    connected components. If `saturation_threshold` is provided, it applies saturation
+    to these connected components (simple sPRO).
 
     Args:
         masks: [np.array or list] [NxHxW] Integer/binary masks (0=background). Positive values
@@ -116,6 +120,8 @@ def _collect_fpr_spro_curve(
         structuring_element_size: If >1, apply dilation with a square kernel of this size.
                                   Default is 1 (no dilation) to match LOCO's exact pixel overlap.
         defect_id_to_config: Optional dict[int, dict(relative: bool, saturation_threshold: float|int)].
+        saturation_threshold: Global saturation threshold for simple sPRO (used if defect_id_to_config is None).
+        relative_saturation: Whether global saturation_threshold is relative (fraction) or absolute (pixels).
 
     Returns:
         (fpr_sorted, spro_sorted, thresholds_sorted)
@@ -205,8 +211,18 @@ def _collect_fpr_spro_curve(
                     coords = region.coords
                     if coords.size == 0:
                         continue
+                    
+                    defect_area = region.area
+                    sat = defect_area
+                    if saturation_threshold is not None:
+                        if relative_saturation:
+                            sat = int(round(saturation_threshold * defect_area))
+                        else:
+                            sat = int(min(saturation_threshold, defect_area))
+                        sat = max(sat, 1)
+
                     tp_pixels = int(binary_map[coords[:, 0], coords[:, 1]].sum())
-                    pro = tp_pixels / float(region.area)
+                    pro = min(tp_pixels / float(sat), 1.0)
                     per_threshold_pros.append(pro)
 
         pro_value = float(np.mean(per_threshold_pros)) if per_threshold_pros else 0.0
@@ -375,6 +391,67 @@ def compute_auc_spro_curve_from_defects_config(
     )
 
 
+def compute_simple_auc_spro(
+    masks,
+    amaps,
+    saturation_threshold: float = 0.5,
+    relative_saturation: bool = True,
+    max_fprs=None,
+    num_thresholds: int = 200,
+):
+    """
+    Computes AUC sPRO with a simple global saturation threshold.
+    
+    This handles Connected Components sPRO where every defect region is saturated
+    by the same global rule.
+
+    Args:
+        masks: [np.array or list] [NxHxW] Binary/Integer ground-truth masks.
+        amaps: [np.array or list] [NxHxW] Anomaly maps.
+        saturation_threshold: Global saturation threshold.
+        relative_saturation: If True, threshold is a fraction of region area.
+        max_fprs: List of FPR integration limits.
+
+    Returns:
+         dict: {
+            "auc_spro": {limit: auc},
+            "fpr_curve": np.array,
+            "spro_curve": np.array,
+            "thresholds": np.array,
+        }
+    """
+    if max_fprs is None:
+        max_fprs = [0.01, 0.05, 0.1, 0.3, 1.0]
+    max_fprs = sorted(set(max_fprs))
+
+    fprs, spro_values, thresholds = _collect_fpr_spro_curve(
+        masks,
+        amaps,
+        num_thresholds=num_thresholds,
+        # No defect_id_to_config -> triggers region-wise fallback
+        defect_id_to_config=None,
+        saturation_threshold=saturation_threshold,
+        relative_saturation=relative_saturation,
+    )
+
+    auc_spros = {}
+    for limit in max_fprs:
+        auc = get_auc_for_max_fpr(
+            fprs=fprs,
+            y_values=spro_values,
+            max_fpr=limit,
+            scale_to_one=True,
+        )
+        auc_spros[limit] = auc
+
+    return {
+        "auc_spro": auc_spros,
+        "fpr_curve": fprs,
+        "spro_curve": spro_values,
+        "thresholds": thresholds,
+    }
+
+
 def get_auc_for_max_fpr(fprs, y_values, max_fpr, scale_to_one=False):
     """
     Compute the area under a curve for a given maximum false positive rate.
@@ -535,3 +612,217 @@ def get_auc_spro_results(metrics,
         auc_spro['mean'] = mean_spros
 
     return {'auc_spro': auc_spro}
+
+
+class OnlineAuSPRO(torch.nn.Module):
+    """
+    PyTorch-compatible metric for calculating AU-sPRO (Area Under the Saturated Per-Region Overlap)
+    during training or validation.
+    
+    This implementation approximates the offline metric by:
+    1. Using fixed, pre-defined thresholds.
+    2. Accumulating pixel-wise statistics for FPR.
+    3. Identifying defects on-the-fly using Connected Components on the binary ground truth.
+    """
+    def __init__(self, 
+                 num_thresholds: int = 100, 
+                 range_min: float = 0.0, 
+                 range_max: float = 1.0,
+                 saturation_threshold: float = 1.0,
+                 relative_saturation: bool = True):
+        """
+        Args:
+            num_thresholds: Number of thresholds to use for the curve.
+            range_min: Minimum value of anomaly scores (usually 0.0).
+            range_max: Maximum value of anomaly scores (usually 1.0).
+            saturation_threshold: The fraction of the defect area that needs to be covered 
+                                  to achieve a score of 1.0. (Default: 1.0 = standard PRO).
+            relative_saturation: If True, saturation_threshold is a ratio. If False, it's a pixel count.
+        """
+        super().__init__()
+        self.num_thresholds = num_thresholds
+        # Create thresholds tensor. 
+        # We use buffers so they are saved with state_dict but not trained.
+        self.register_buffer('thresholds', torch.linspace(range_min, range_max, num_thresholds))
+        
+        self.saturation_threshold = saturation_threshold
+        self.relative_saturation = relative_saturation
+
+        # Accumulators
+        self.register_buffer('fp_areas', torch.zeros(num_thresholds, dtype=torch.float64))
+        self.register_buffer('tn_areas', torch.zeros(num_thresholds, dtype=torch.float64))
+        self.register_buffer('spro_sum', torch.zeros(num_thresholds, dtype=torch.float64))
+        self.register_buffer('defect_count', torch.tensor(0, dtype=torch.long))
+        
+    def reset(self):
+        """Resets the internal state."""
+        self.fp_areas.zero_()
+        self.tn_areas.zero_()
+        self.spro_sum.zero_()
+        self.defect_count.zero_()
+
+    @torch.no_grad()
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """
+        Update metrics with a batch of predictions and targets.
+
+        Args:
+            preds: Anomaly map tensor (B, H, W) or (B, 1, H, W). Range [0, 1].
+            target: Ground truth binary mask (B, H, W) or (B, 1, H, W). Values 0 or 1.
+        """
+        # Ensure correct shapes (remove channel dim if 1)
+        if preds.ndim == 4 and preds.shape[1] == 1:
+            preds = preds.squeeze(1)
+        if target.ndim == 4 and target.shape[1] == 1:
+            target = target.squeeze(1)
+            
+        assert preds.shape == target.shape, f"Shape mismatch: {preds.shape} vs {target.shape}"
+        
+        # Ensure inputs are on the same device as thresholds
+        preds = preds.to(self.thresholds.device)
+        target = target.to(self.thresholds.device)
+        
+        # 1. Global FPR Statistics (Vectorized on GPU)
+        # Broadcast comparison: (B, T, H, W)
+        # This can be memory intensive. We iterate if thresholds are large?
+        # For 100 thresholds and batch size 8, it's manageable (800 * H * W * bool).
+        
+        # Thresholding: preds >= t
+        # shape: (T, B, H, W) -> permute to (B, T, H, W)
+        binary_preds = preds.unsqueeze(1) >= self.thresholds.view(1, -1, 1, 1)
+        
+        # Identify GT Background (0) and Defect (1)
+        # target shape (B, H, W) -> broadcast to (B, 1, H, W)
+        gt_mask = target.unsqueeze(1).bool()
+        
+        # FP: Pred=1, GT=0
+        fp_pixels = (binary_preds & (~gt_mask))
+        self.fp_areas += fp_pixels.sum(dim=(0, 2, 3)).double() # Sum over B, H, W
+        
+        # TN: Pred=0, GT=0
+        # Pred=0 is ~binary_preds
+        tn_pixels = ((~binary_preds) & (~gt_mask))
+        self.tn_areas += tn_pixels.sum(dim=(0, 2, 3)).double()
+        
+        # 2. sPRO Calculation (Per-Region)
+        # We need to identify connected components in the target.
+        # This is easier on CPU with skimage
+        
+        preds_cpu = preds.detach().cpu().numpy()
+        target_cpu = target.detach().cpu().numpy()
+        
+        thresholds_np = self.thresholds.cpu().numpy()
+        
+        for i in range(preds.shape[0]):
+            img_target = target_cpu[i]
+            img_preds = preds_cpu[i]
+            
+            # Skip if good image (no defects)
+            if img_target.sum() == 0:
+                continue
+                
+            # Label connected components
+            labeled_mask = measure.label(img_target)
+            for region in measure.regionprops(labeled_mask):
+                defect_area = region.area
+                
+                # Saturation Area
+                if self.relative_saturation:
+                    sat_area = defect_area * self.saturation_threshold
+                    # Minimum 1 pixel? usually not strictly enforced but good for stability
+                    sat_area = max(sat_area, 1.0)
+                else:
+                    sat_area = min(defect_area, self.saturation_threshold)
+                
+                # Calculate TP area for this specific region across ALL thresholds
+                # Optimization: extract only the region pixels
+                coords = region.coords
+                region_scores = img_preds[coords[:, 0], coords[:, 1]]
+                
+                # Vectorized thresholding on CPU
+                # shape (T, PixelsInRegion)
+                # We want to count how many pixels are >= threshold
+                # Sort scores? No, just broadcasting is fine for 100 thresholds.
+                # region_scores: (N,)
+                # thresholds: (T,)
+                # (T, 1) <= (1, N) -> (T, N) sum -> (T,)
+                tp_area = (region_scores[None, :] >= thresholds_np[:, None]).sum(axis=1)
+                
+                spro = np.minimum(tp_area / sat_area, 1.0)
+                
+                self.spro_sum += torch.from_numpy(spro).to(self.spro_sum.device)
+                self.defect_count += 1
+
+    def compute(self, max_fpr: float = 1.0) -> float:
+        """
+        Compute the final AU-sPRO score.
+        
+        Args:
+            max_fpr: The maximum FPR integration limit (default 1.0). 
+                     The AUC will be normalized (scaled to 1) by this value.
+        """
+        if self.defect_count == 0:
+            return 0.0
+            
+        # 1. Mean sPRO
+        mean_spros = self.spro_sum / self.defect_count
+        
+        # 2. FPR
+        # Handle division by zero
+        denominator = self.tn_areas + self.fp_areas
+        # If denominator is 0, FPR is 0 (no background pixels?)
+        fprs = torch.zeros_like(self.fp_areas)
+        mask = denominator > 0
+        fprs[mask] = self.fp_areas[mask] / denominator[mask]
+        
+        # 3. AUC Integration (Trapezoidal rule)
+        # Convert to CPU for numpy integration
+        fprs_np = fprs.cpu().numpy()
+        spros_np = mean_spros.cpu().numpy()
+        
+        # Sort by FPR
+        sorted_indices = np.argsort(fprs_np)
+        fprs_sorted = fprs_np[sorted_indices]
+        spros_sorted = spros_np[sorted_indices]
+        
+        # Clip to max_fpr
+        if max_fpr < 1.0:
+            # Find indices where fpr <= max_fpr
+            # We might need to interpolate the point exactly at max_fpr
+            # for precise area, but for monitoring, simple clipping is often enough.
+            # However, strictly we should add a point (max_fpr, interpolated_spro).
+            
+            mask = fprs_sorted <= max_fpr
+            fprs_clipped = fprs_sorted[mask]
+            spros_clipped = spros_sorted[mask]
+            
+            # If we have points beyond max_fpr, interpolate the value at max_fpr
+            if np.any(~mask):
+                # Get the first point beyond max_fpr
+                idx_next = np.argmax(fprs_sorted > max_fpr)
+                idx_prev = idx_next - 1
+                
+                if idx_prev >= 0:
+                    x0, y0 = fprs_sorted[idx_prev], spros_sorted[idx_prev]
+                    x1, y1 = fprs_sorted[idx_next], spros_sorted[idx_next]
+                    
+                    # Linear interpolation
+                    y_interp = y0 + (y1 - y0) * (max_fpr - x0) / (x1 - x0)
+                    
+                    fprs_clipped = np.append(fprs_clipped, max_fpr)
+                    spros_clipped = np.append(spros_clipped, y_interp)
+            
+            fprs_sorted = fprs_clipped
+            spros_sorted = spros_clipped
+            
+        # Integration
+        # Check if we have enough points
+        if len(fprs_sorted) < 2:
+            return 0.0
+            
+        auc = np.trapz(y=spros_sorted, x=fprs_sorted)
+        
+        # Scale to 1 (normalize by max_fpr)
+        auc = auc / max_fpr
+        
+        return float(auc)
